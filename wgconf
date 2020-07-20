@@ -1,0 +1,105 @@
+#!/bin/bash
+# v0.1.0
+
+# static variables
+WG_DIR=/etc/wireguard
+CLIENT_DIR=$WG_DIR/clients
+IPV4_PREFIX="10.255.2."
+IPV6_PREFIX="fdff:2::"
+
+#get client name $NAME
+
+debug() {
+	printf "$1\n"
+}
+
+generate_client_list() {
+        debug "generating client list"
+
+        # function argument
+        CONFIG_FILE=/etc/wireguard/vpn.conf
+
+        NUM_PEERS=$(grep -o "\[Peer\]" $CONFIG_FILE | wc -l)
+
+        debug "number of peers: $NUM_PEERS"
+
+        declare -A PEERS
+        for i in $(seq $NUM_PEERS)
+        do
+		debug "peer $i"
+
+                # get peer preshared key
+                PSK=$(awk -v n=$i '/^\[Peer\]/{l++} (l==n){print}' $CONFIG_FILE | sed -ne 's/^.*PresharedKey[[:space:]]*=[[:space:]]*//p')
+		[ -z "$PSK" ] && break
+		debug "peer $i psk is: $PSK"
+
+		# search client config files for that preshared key
+                CLIENT_CONF=$(grep -Ral $PSK $CLIENT_DIR)
+		debug "client conf path: $CLIENT_CONF"
+                # get client number from its config file
+                IP_PREFIX=$(printf "$IPV6_PREFIX\|$IPV4_PREFIX" | sed  's/\./\\./g')
+                CLIENT_NUM=$(sed -ne "/Address/ s/^.*\($IP_PREFIX\)\(.*\)\/.*/\2/p" $CLIENT_CONF)
+		debug "client $i num is: $CLIENT_NUM"
+
+                PEERS[$CLIENT_NUM]=$CLIENT_CONF
+        done
+
+	debug "there are ${#PEERS[@]} members in teh array"
+
+	for i in "${!PEERS[@]}"
+	do
+		printf "key : $i\n"
+		printf "value : ${PEERS[$i]}\n"
+	done
+}
+
+get_client_number() {
+	debug "finding next available client id"
+
+	generate_client_list
+
+	debug "\$ PEERS needs to be made global or something"
+
+        for i in $(seq 2 254)
+        do
+		debug "trying number $i"
+                if ! [[ -v "PEERS[$i]" ]]; then
+                        printf "$i"
+			return
+                fi
+        done
+}
+
+gen_peer(){
+	INTERFACE="vpn"
+	NAME=test
+	CONF=$CLIENT_DIR/$NAME.conf
+
+	debug "generating keys"
+
+	KEY=$(wg genkey)
+        PUB=$(printf $KEY | wg pubkey)
+        PSK=$(wg genpsk)
+
+	debug "making config file"
+
+	cp $CLIENT_DIR/template $NAME.conf
+
+	NUM=$(get_client_number)
+
+	debug "new client num is $NUM"
+
+	ADDRv4=$IPV4_PREFIX$NUM
+	ADDRv6=$IPV6_PREFIX$NUM
+
+	sed -i "s/$IPV4_PREFIX/$ADDRv4/" $CONF
+	sed -i "s/$IPV6_PREFIX/$ADDRv6/" $CONF
+	sed -i "s/PrivateKey =/& $KEY/" $CONF
+	sed -i "s/PresharedKey =/& $PSK/" $CONF
+
+	wg set $INTERFACE peer $PUB preshared-key $PSK allowed-ips $ADDRv6/128,$ADDRv4/32
+
+	qrencode -t ansiutf8 < $NAME.conf
+}
+
+gen_peer
