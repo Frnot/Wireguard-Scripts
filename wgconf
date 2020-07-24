@@ -1,5 +1,5 @@
 #!/bin/bash
-# v0.4.0
+# v0.6.0
 # static variables
 WG_DIR=/etc/wireguard
 IPV4_PREFIX="10.255.2."
@@ -7,6 +7,7 @@ IPV6_PREFIX="fdff:2::"
 
 
 main() {
+	clear
 	declare -A ints
 	retrieve_interfaces ints
 
@@ -15,7 +16,6 @@ main() {
 		printf "No VPN interfaces found.\n\n"
 		new_interface
 		main
-		exit
 	fi
 	
 	for i in "${!ints[@]}"
@@ -30,20 +30,24 @@ main() {
 		case $choice in
 			'1')
 				new_interface
+				main
 				;;
 			'2')
 				choose_int ints "Choose an interface to delete" rtn
 				delete_interface $rtn
+				main
 				;;
 			'3')
 				choose_int ints "Choose an interface to modify" rtn
 				edit_interface $rtn
+				main
 				;;
 		esac
 	done
 }
 
 edit_interface() {
+	clear
 	local int=$1
 	printf "\nEdit interface: $int\n"
 	printf '%s\n' "---------------"
@@ -59,31 +63,47 @@ edit_interface() {
 		case $choice in
 			'1')
 				rekey_interface $1
+				todo
+				edit_interface
 				;;
 			'2')
 				choose_peer $int
+				[ $? != 0 ] && continue
+				todo
+				edit_interface
 				;;
 			'3')
-				choose_peer $int "Show peer config:" rtn
+				choose_peer $int "to view:" rtn
+				[ $? != 0 ] && continue
 				show_peer_config $rtn
+				edit_interface
 				;;
 			'4')
 				new_peer $int
+				edit_interface
 				;;
 			'5')
-				choose_peer $int "Choose a peer to delete" rtn
+				choose_peer $int "to delete" rtn
+				[ $? != 0 ] && continue
 				delete_peer $rtn
+				edit_interface
 				;;
 			'6')
-				choose_peer $int "Choose a peer to modify" rtn
+				choose_peer $int "to modify" rtn
+				[ $? != 0 ] && continue
 				edit_peer $rtn
+				edit_interface
 				;;
 		esac
 	done
 }
 
 choose_peer() {
-	local conf_files=($(find $WG_DIR/$1_peers -type f -name "*.conf"))
+	local int=$1
+	local msg=$2
+	local conf_files=($(find $WG_DIR/${int}_peers -type f -name "*.conf"))
+	
+	#TODO use gen_peer_list instead
 	
 	declare -A peers
 	for i in "${conf_files[@]}"
@@ -99,6 +119,11 @@ choose_peer() {
 		peers[$num]=$i
 	done
 	
+	if [ "${#peers[@]}" = 0 ]; then
+		printf "This interface has no peers $msg - Add one.\n"
+		return 1
+	fi
+	
 	printf "\n#     Name\n" 
 	#TODO: format
 	for i in "${!peers[@]}"
@@ -106,7 +131,7 @@ choose_peer() {
 		printf "$i) $(basename ${peers[$i]} .conf)\n"
 	done
 	
-	printf "\n$2\n"
+	printf "\nChoose peer $msg\n"
 	while true; do
 		read -p 'Peer #: ' choice
 		if ! [ -z ${peers[$choice]} ]; then
@@ -117,51 +142,44 @@ choose_peer() {
 }
 
 new_peer() {
+	clear
 	local intconf=$1
 	local peer_dir=$WG_DIR/$(basename $intconf .conf)_peers
+	local peerconf=$peer_dir/$name.conf
 	
 	printf "Create new peer on interface $(basename $intconf .conf)\n"
 	read -p "Peer Name: " name
-	read -p "DNS Server (Enter for done): " dns
 
-	/$name.conf
+
 
 	local key=$(wg genkey)
 	local pub=$(printf $key | wg pubkey)
 	local psk=$(wg genpsk)
+	local intpub=$(cat $(printf $intconf | sed 's/conf/pub/g'))
 
-	#TODO finish following function
-	local peernum=$(get_peer_number $int)
+	get_peer_number $intconf peernum
 
 	#TODO: get all the ip address ranges (ipv4 and/or ipv6) from interface file and append peer number
-
-	ADDRv4=$IPV4_PREFIX$peernum
+	#TODO: fix this so it copies cidr
+	ADDRv4=addr_prefix=$(sed -ne "/Address/ s/^.*=[[:space:]]*\([^,]*[\.:]\)[0-9]*\/.*/\1/p" $intconf)
 	ADDRv6=$IPV6_PREFIX$peernum
 
-	#TODO: maybe generate template file if it doesn't exists and use it from then on (if generating conf from scratch is slow)
-	#cp $peer_DIR/template $NAME.conf
+	# If peer template doesn't exist, create it.
+	if [ ! -f $peer_dir/template ]; then
+		create_peer_template $(basename $intconf .conf)
+	fi
+	
+	cp $peer_dir/template $peerconf
 	#sed -i "s/$IPV4_PREFIX/$ADDRv4/" $CONF
 	#sed -i "s/$IPV6_PREFIX/$ADDRv6/" $CONF
-	#sed -i "s/PrivateKey =/& $KEY/" $CONF
-	#sed -i "s/PresharedKey =/& $PSK/" $CONF
-
-	#wg set $INTERFACE peer $PUB preshared-key $PSK allowed-ips $ADDRv6/128,$ADDRv4/32
+	sed -i "s/PrivateKey =/& $key/" $peerconf
+	sed -i "s/PublicKey =/& $intpub/" $peerconf
+	sed -i "s/PresharedKey =/& $psk/" $peerconf
 	
-	# Generate peer config
-	peerconf=$peer_dir/$name.conf
-	cat >$peerconf <<EOF
-[Interface]
-Address = $ADDRv6/64, $ADDRv4/24
-PrivateKey = $key
-DNS = $dns
-
-[Peer]
-PublicKey = $(cat $(printf $intconf | sed 's/conf/pub/g'))
-PresharedKey = $psk
-AllowedIPs = ::/0, 0.0.0.0/0
-Endpoint = vpn.zeta.frnot.com:53
-PersistentKeepalive = 25
-EOF
+	#TODO ask for allowed ips (enter for all
+	
+	#TODO: ask if this is good (cat config)
+	#if not redo
 
 	# Edit interface config
 	cat >>$intconf <<EOF
@@ -171,6 +189,8 @@ PublicKey = $pub
 PresharedKey = $psk
 AllowedIPs = $ADDRv6/128, $ADDRv4/32
 EOF
+
+	#TODO update wireguard daemon
 
 	show_peer_config $peerconf
 }
@@ -183,23 +203,51 @@ show_peer_config() {
 }
 
 get_peer_number() {
+	local intname=$1
+	local intconf=$WG_DIR/$intname.conf
+	local peer_dir=$WG_DIR/${intname}_peers
 	# Finds lowest available peer number on interface
 	
 	#TODO make this part of choose_peer a seperate function
-	generate_peer_list
+	#TODO TODO TODO this peerlist may need to be initialized here; see first function of script for example
+	gen_peer_list $intname peerlist
 
-	debug "\$ PEERS needs to be made global or something"
-
-        for i in $(seq 2 254)
-        do
-		debug "trying number $i"
-                if ! [[ -v "PEERS[$i]" ]]; then
-                        printf "$i"
+    for i in $(seq 2 254)
+    do
+        if ! [[ -v "peerlist[$i]" ]]; then
+			eval $2=$i
 			return
-                fi
-        done
+		fi
+    done
 }
 
+################################################################################################################################
+
+gen_peer_list() {
+	local intname=$1
+	local intconf=$WG_DIR/$intname.conf
+	local peer_dir=$WG_DIR/${intname}_peers
+	
+	local conf_files=($(find $WG_DIR/$peer_dir -type f -name "*.conf"))
+	
+	# This regex grabs everything but the last octet of the first address in the interface config
+	local addr_prefix=$(sed -ne "/Address/ s/^.*=[[:space:]]*\([^,]*[\.:]\)[0-9]*\/.*/\1/p" $intconf)
+					
+	declare -A peers
+	for i in "${conf_files[@]}"
+	do
+		local num=$(sed -ne "/Address/ s/^.*$addr_prefix\(.*\)\/.*/\1/p" $i)
+		
+		if [ $num -gt 254 ]; then
+			printf "error - peer $i - peer number exceeds limit!\n"
+			continue
+		fi
+		
+		peers[$num]=$i
+	done
+
+	eval $2=$peers
+}
 
 edit_peer() {
 	#TODO ask:
@@ -246,39 +294,131 @@ retrieve_interfaces() {
 }
 
 new_interface() {
-	printf "Create new interface -\n"
+	printf "Create new interface\n"
 	read -p "Interface Name: " name
-	read -p "IPv4 Address range (enter for none): " ipv4addr
-	read -p "IPv6 Address range (enter for none): " ipv6addr
-	read -p "Interface port (enter for default): " port
 	
-	# TODO: need some sort of string builder for ip addresses
+	# IP Address Builder
+	while true; do
+		printf "Enter IPv6 Address in CIDR format (or enter for none).\n"
+		read -p '> ' ipv6
+		
+		printf "Enter IPv4 Address in CIDR format (or enter for none).\n"
+		read -p '> ' ipv4
+		
+		if [ "$ipv6" = "" ] && [ "$ipv4" = "" ]; then
+			continue
+		fi
+		
+		if [ "$ipv6" != "" ]; then
+			addresses=$ipv6
+			if [ "$ipv4" != "" ]; then
+				addresses="$addresses, $ipv4"
+			fi
+		else
+			addresses=$ipv4
+		fi
+		
+		printf "Does this look correct?\n"
+		printf "Address = $addresses\n"
+		while true; do
+			read -p "[y/n]: " ans
+			if [ "$ans" = "y" ]; then
+				break 2
+			elif [ "$ans" = "n" ]; then
+				break 1
+			fi
+		done
+	done
+	
+	printf "Interface Listen Port (enter for default):\n"
+	read -p "> " port
+	if [ "$port" = "" ]; then
+		port="51820"
+	fi
 	
 	key=$(wg genkey)
-	pub=$(echo $key | wg pubkey)
 	
 	cat >$WG_DIR/$name.conf <<EOF
 [Interface]
-Address = $ipv4, $ipv6
+Address = $addresses
 ListenPort = $port
 PrivateKey = $key
 EOF
-
-	printf $pub >$WG_DIR/$name.pub
+	
+	systemctl enable --now wg-quick@$name
 	
 	# create a new directory for peers
 	mkdir $WG_DIR/${name}_peers
+	# create template for peer configs
+	create_peer_template $name
+}
+
+create_peer_template() {
+	local name=$1
+	local intconf=$WG_DIR/$name.conf
+	local wd=$WG_DIR/${name}_peers
+	clear
+	printf "Creating Peer template for interface \"$name\"\n"
+	
+	pubkey=$(sed -ne 's/^.*PrivateKey[[:space:]]*=[[:space:]]*//p' $intconf | wg pubkey)
+	port=$(sed -ne 's/^.*ListenPort[[:space:]]*=[[:space:]]*//p' $intconf)
+	
+	while true; do
+		printf "\nEnter the FQDN or IP address of the VPN endpoint.\n"
+		printf "Note: the port will be selected automatically.\n"
+		read -p "FQDN/IP: " epaddr
+		
+		# If an IPv6 Address was entered (':' occurs more than once), encase in brackets
+		if printf "$epaddr" | grep -q ':.*:' ; then
+			epaddr="[$epaddr]"
+		fi
+		
+		printf "\nEndpoint = $epaddr:$port\n"
+		while true; do
+			read -p "Does this look right? [y/n]: " ans
+			if [ "$ans" = "y" ]; then
+				break 2
+			elif [ "$ans" = "n" ]; then
+				break 1
+			fi
+		done
+	done
+	
+	
+	cat >$wd/template <<EOF
+[Interface]
+Address = 
+PrivateKey = 
+DNS = 
+
+[Peer]
+PublicKey = $pubkey
+PresharedKey = 
+AllowedIPs = 
+Endpoint = $epaddr:$port
+PersistentKeepalive = 25
+EOF
 }
 
 delete_interface() {
 	local int=$1
-	wg-quick down $int
-	rm $WG_DIR/$int.conf
+	printf "Note: this will delete the configuration file for the interface and all of its peers.\n"
+	printf "Are you sure you want to delete the interface: \"$int\" ?\n"
+	while true; do
+		read -p "[y/n]: " ans
+		if [ {$ans,,} = "y" ]; then
+			break
+		elif [ {$ans,,} = "n" ]; then
+			return
+		fi
+	done
+	
+	systemctl disable --now wg-quick@$int
+	rm -f $WG_DIR/$int.conf
+	rm -rf $WG_DIR/${int}_peers
 }
 
-
-
-generate_peer_list() {
+generate_peer_listold() {
         debug "generating peer list"
 
         # function argument
@@ -318,8 +458,9 @@ generate_peer_list() {
 	done
 }
 
-debug() {
-	printf "$1\n"
+todo() {
+	printf "\nFeature coming soon!\n"
+	sleep 2
 }
 
 main
