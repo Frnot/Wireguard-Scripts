@@ -1,9 +1,7 @@
 #!/bin/bash
-# v0.6.0
+# v0.7.0
 # static variables
 WG_DIR=/etc/wireguard
-IPV4_PREFIX="10.255.2."
-IPV6_PREFIX="fdff:2::"
 
 
 main() {
@@ -141,6 +139,8 @@ choose_peer() {
 	eval $3="${peers[$choice]}"
 }
 
+###############################################################################################################################
+
 new_peer() {
 	clear
 	local intconf=$1
@@ -159,10 +159,25 @@ new_peer() {
 
 	get_peer_number $intconf peernum
 
-	#TODO: get all the ip address ranges (ipv4 and/or ipv6) from interface file and append peer number
-	#TODO: fix this so it copies cidr
-	ADDRv4=addr_prefix=$(sed -ne "/Address/ s/^.*=[[:space:]]*\([^,]*[\.:]\)[0-9]*\/.*/\1/p" $intconf)
-	ADDRv6=$IPV6_PREFIX$peernum
+	# TODO: clean up this trash
+
+	# Pulls addresses from interface config
+	local intaddresses=$(sed -ne 's/^.*Address[[:space:]]*=[[:space:]]*//p' $intconf)
+	# If addresses contains a comma there are two addresses
+	if printf "$addresses" | grep -q ',' ; then
+		local intaddr1=$(printf $intaddresses | sed -ne 's/\(.*\/.*\),.*/\1/p')
+		local intaddr2=$(printf $intaddresses | sed -ne 's/.*,[[:space:]]*\(.*\/.*\)[[:space:]]*/\1/p')
+	else
+		local intaddr1=$(printf $intaddresses | sed -ne 's/\(.*\/.*\),.*/\1/p')
+	fi
+	# Replaces last octet with peer number
+	local addr1=$(printf $intaddr1 | sed -ne "s/\(.*[\.:]\).*\(\/.*\)/\1$peernum\2/p"
+	local addresses=$addr1
+	# TODO check if this ! -z even works
+	if [ ! -z $intaddr2 ]; then
+		local addr2=$(printf $intaddr2 | sed -ne "s/\(.*[\.:]\).*\(\/.*\)/\1$peernum\2/p"
+		local addresses="$addresses, $addr1"
+	fi
 
 	# If peer template doesn't exist, create it.
 	if [ ! -f $peer_dir/template ]; then
@@ -170,8 +185,7 @@ new_peer() {
 	fi
 	
 	cp $peer_dir/template $peerconf
-	#sed -i "s/$IPV4_PREFIX/$ADDRv4/" $CONF
-	#sed -i "s/$IPV6_PREFIX/$ADDRv6/" $CONF
+	sed -i "s/Address =/& $addresses/" $peerconf
 	sed -i "s/PrivateKey =/& $key/" $peerconf
 	sed -i "s/PublicKey =/& $intpub/" $peerconf
 	sed -i "s/PresharedKey =/& $psk/" $peerconf
